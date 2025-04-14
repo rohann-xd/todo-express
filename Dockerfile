@@ -1,18 +1,22 @@
-# Use the official Node.js LTS image
 FROM node:22
 
 # Set working directory
 WORKDIR /app
 
-# Copy package files and install dependencies
+# Copy package files first (for better caching)
 COPY package*.json ./
-RUN npm install
 
-# Copy the rest of the app
+# Optimize npm settings and use npm ci for faster, more reliable installation
+RUN npm config set registry https://registry.npmjs.org/ \
+    && npm config set fetch-retries 3 \
+    && npm config set fetch-retry-factor 2 \
+    && npm ci
+
+# Copy the rest of the application
 COPY . .
 
-# Expose port (match the port in server.js, usually 3000)
-EXPOSE 3000
+# Set the command to run the application
+CMD ["npm", "start"]
 
-# Start the app
-CMD ["node", "server.js"]
+# Expose the port your app runs on
+EXPOSE 3000

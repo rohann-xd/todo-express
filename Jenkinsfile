@@ -1,6 +1,11 @@
 pipeline {
     agent any
     
+    options {
+        timeout(time: 30, unit: 'MINUTES')  // Add timeout to prevent hanging builds
+        disableConcurrentBuilds()  // Prevent concurrent builds from the same branch
+    }
+    
     environment {
         APP_NAME = "todo-app"
         APP_BLUE = "${APP_NAME}-blue"
@@ -112,9 +117,15 @@ EOF
                     sh "docker stop ${env.TARGET_CONTAINER} || true"
                     sh "docker rm ${env.TARGET_CONTAINER} || true"
                     
-                    // Build and start the new version
-                    sh "docker-compose build app"
-                    sh "docker-compose up -d app"
+                    // Build with a timeout and no-cache option to avoid hanging
+                    timeout(time: 15, unit: 'MINUTES') {
+                        sh "docker-compose build --no-cache app"
+                    }
+                    
+                    // Start the new version with a timeout
+                    timeout(time: 2, unit: 'MINUTES') {
+                        sh "docker-compose up -d app"
+                    }
                     
                     // Give the app time to start
                     sh "sleep 10"
@@ -132,19 +143,21 @@ EOF
                     }
                     
                     // Health check the application using the root path (/)
-                    try {
-                        def statusCode = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://localhost:${PORT}/ || echo 'failed'", returnStdout: true).trim()
-                        
-                        if (statusCode != "200") {
-                            // Try to get logs for debugging
+                    timeout(time: 2, unit: 'MINUTES') {
+                        try {
+                            def statusCode = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://localhost:${PORT}/ || echo 'failed'", returnStdout: true).trim()
+                            
+                            if (statusCode != "200") {
+                                // Try to get logs for debugging
+                                sh "docker logs ${env.TARGET_CONTAINER}"
+                                error "Application health check failed with status ${statusCode}"
+                            }
+                            
+                            echo "New deployment health check passed"
+                        } catch (Exception e) {
                             sh "docker logs ${env.TARGET_CONTAINER}"
-                            error "Application health check failed with status ${statusCode}"
+                            error "Health check failed: ${e.message}"
                         }
-                        
-                        echo "New deployment health check passed"
-                    } catch (Exception e) {
-                        sh "docker logs ${env.TARGET_CONTAINER}"
-                        error "Health check failed: ${e.message}"
                     }
                 }
             }
@@ -183,17 +196,19 @@ EOF
             steps {
                 script {
                     // Final application health check
-                    try {
-                        // Using curl to check the root path (/)
-                        def statusCode = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://localhost:${PORT}/ || echo 'failed'", returnStdout: true).trim()
-                        
-                        if (statusCode != "200") {
-                            error "Final verification failed with status ${statusCode}"
+                    timeout(time: 2, unit: 'MINUTES') {
+                        try {
+                            // Using curl to check the root path (/)
+                            def statusCode = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://localhost:${PORT}/ || echo 'failed'", returnStdout: true).trim()
+                            
+                            if (statusCode != "200") {
+                                error "Final verification failed with status ${statusCode}"
+                            }
+                            
+                            echo "Deployment complete and verified"
+                        } catch (Exception e) {
+                            error "Final verification failed: ${e.message}"
                         }
-                        
-                        echo "Deployment complete and verified"
-                    } catch (Exception e) {
-                        error "Final verification failed: ${e.message}"
                     }
                 }
             }
@@ -272,6 +287,9 @@ EOF
             echo "Current container state:"
             sh "docker ps -a | grep ${APP_NAME} || true"
             sh "docker ps -a | grep ${MONGO_CONTAINER} || true"
+            
+            // Clean up any failed builds to save disk space
+            sh "docker system prune -f || true"
         }
     }
 }
