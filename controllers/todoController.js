@@ -2,8 +2,12 @@ const Todo = require("../models/Todo");
 
 // Display all todos
 exports.getTodos = async (req, res) => {
-  const todos = await Todo.find();
-  res.render("index", { todos });
+  try {
+    const todos = await Todo.find();
+    res.status(200).render("index", { todos });
+  } catch (error) {
+    res.status(500).send("Server Error");
+  }
 };
 
 // Add a new todo
