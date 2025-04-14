@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Todo App</title>
+    <link rel="stylesheet" href="/css/style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <h1>Todo App 📝</h1>
+
+      <form action="/add" method="POST" class="todo-form">
+        <input type="text" name="task" placeholder="Enter new todo" required />
+        <button type="submit">Add Todo</button>
+      </form>
+
+      <ul class="todo-list">
+        <% todos.forEach(function(todo) { %>
+        <li class="<%= todo.completed ? 'completed' : '' %>">
+          <form
+            action="/complete/<%= todo._id %>"
+            method="POST"
+            class="checkbox-form"
+          >
+            <!-- Checkbox with onchange auto-submit -->
+            <input type="checkbox" name="completed" value="true"
+            onchange="this.nextElementSibling.disabled = true;
+            this.form.submit();" <%= todo.completed ? 'checked' : '' %> />
+
+            <!-- Hidden input only submits when checkbox is unchecked -->
+            <input type="hidden" name="completed" value="false" />
+          </form>
+
+          <span><%= todo.task %></span>
+
+          <form action="/delete/<%= todo._id %>" method="POST">
+            <button type="submit" class="delete-btn">🗑️</button>
+          </form>
+        </li>
+        <% }); %>
+      </ul>
+    </div>
+  </body>
+</html>
