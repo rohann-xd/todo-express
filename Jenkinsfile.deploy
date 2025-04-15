@@ -1,9 +1,8 @@
 pipeline {
     agent any
     
-    options {
-        timeout(time: 30, unit: 'MINUTES')  // Add timeout to prevent hanging builds
-        disableConcurrentBuilds()  // Prevent concurrent builds from the same branch
+    parameters {
+        string(name: 'IMAGE_TAG', defaultValue: 'latest', description: 'Docker image tag to deploy')
     }
     
     environment {
@@ -11,17 +10,11 @@ pipeline {
         APP_BLUE = "${APP_NAME}-blue"
         APP_GREEN = "${APP_NAME}-green"
         BACKUP_CONTAINER = "${APP_NAME}-backup"
-        MONGO_CONTAINER = "mongo"
+        DOCKER_HUB_REPO = ""  // Replace with your Docker Hub username
         PORT = "3000"
     }
     
     stages {
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
-        }
-        
         stage('Prepare Environment') {
             steps {
                 script {
@@ -35,16 +28,6 @@ pipeline {
                         echo "NODE_ENV=$NODE_ENV" >> .env
                         echo "PORT=3000" >> .env
                         '''
-                    }
-                    
-                    // Check if MongoDB container is running, if not, start it
-                    def mongoRunning = sh(script: "docker ps -q -f name=${MONGO_CONTAINER}", returnStdout: true).trim()
-                    if (!mongoRunning) {
-                        echo "MongoDB container not running. Starting it..."
-                        sh "docker-compose up -d mongo"
-                        sh "sleep 10" // Give MongoDB time to initialize
-                    } else {
-                        echo "MongoDB container already running, ensuring data persistence..."
                     }
                 }
             }
@@ -61,31 +44,26 @@ pipeline {
                     
                     // Determine which color to deploy next
                     if (prodExists) {
-                        // Get the color label from the production container if it exists
                         def containerColor = sh(script: "docker inspect ${APP_NAME} --format '{{index .Config.Labels \"color\"}}' 2>/dev/null || echo 'unknown'", returnStdout: true).trim()
                         
                         env.CURRENT_COLOR = containerColor != "unknown" ? containerColor : "blue"
                         env.TARGET_COLOR = env.CURRENT_COLOR == "blue" ? "green" : "blue"
                         env.TARGET_CONTAINER = env.TARGET_COLOR == "blue" ? APP_BLUE : APP_GREEN
                     } else if (blueExists || greenExists) {
-                        // If no prod but blue or green exists, use the opposite
                         env.CURRENT_COLOR = blueExists ? "blue" : "green"
                         env.TARGET_COLOR = env.CURRENT_COLOR == "blue" ? "green" : "blue"
                         env.TARGET_CONTAINER = env.TARGET_COLOR == "blue" ? APP_BLUE : APP_GREEN
                     } else {
-                        // First deployment - start with blue
                         env.CURRENT_COLOR = "none"
                         env.TARGET_COLOR = "blue"
                         env.TARGET_CONTAINER = APP_BLUE
                     }
                     
-                    // Save current state for potential rollback in post section
                     env.BEFORE_DEPLOYMENT_PROD_EXISTS = prodExists ? "true" : "false"
                     if (prodExists) {
                         env.BEFORE_DEPLOYMENT_PROD_COLOR = env.CURRENT_COLOR
                     }
                     
-                    // Cleanup strategy for backup
                     if (backupExists) {
                         echo "Backup container exists and will be removed"
                         sh "docker stop ${BACKUP_CONTAINER} || true"
@@ -97,35 +75,25 @@ pipeline {
             }
         }
         
-        stage('Build and Deploy New Version') {
+        stage('Deploy New Container') {
             steps {
                 script {
-                    // Create docker-compose override file for this deployment
-                    sh """
-                    cat <<EOF > docker-compose.override.yml
-version: "3.8"
-services:
-  app:
-    container_name: ${env.TARGET_CONTAINER}
-    labels:
-      color: ${env.TARGET_COLOR}
-      deployed: "\$(date +'%Y-%m-%d-%H-%M-%S')"
-EOF
-                    """
-                    
                     // Stop the target container if it already exists
                     sh "docker stop ${env.TARGET_CONTAINER} || true"
                     sh "docker rm ${env.TARGET_CONTAINER} || true"
                     
-                    // Build with a timeout and no-cache option to avoid hanging
-                    timeout(time: 15, unit: 'MINUTES') {
-                        sh "docker-compose build --no-cache app"
-                    }
+                    // Pull the latest image
+                    sh "docker pull ${env.DOCKER_HUB_REPO}:${params.IMAGE_TAG}"
                     
-                    // Start the new version with a timeout
-                    timeout(time: 2, unit: 'MINUTES') {
-                        sh "docker-compose up -d app"
-                    }
+                    // Run the new container
+                    sh """
+                    docker run -d --name ${env.TARGET_CONTAINER} \
+                      -p ${PORT}:${PORT} \
+                      --env-file .env \
+                      --label color=${env.TARGET_COLOR} \
+                      --label deployed="\$(date +'%Y-%m-%d-%H-%M-%S')" \
+                      ${env.DOCKER_HUB_REPO}:${params.IMAGE_TAG}
+                    """
                     
                     // Give the app time to start
                     sh "sleep 10"
@@ -142,13 +110,12 @@ EOF
                         error "New container failed to start: ${env.TARGET_CONTAINER}"
                     }
                     
-                    // Health check the application using the root path (/)
+                    // Health check
                     timeout(time: 2, unit: 'MINUTES') {
                         try {
                             def statusCode = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://localhost:${PORT}/ || echo 'failed'", returnStdout: true).trim()
                             
                             if (statusCode != "200") {
-                                // Try to get logs for debugging
                                 sh "docker logs ${env.TARGET_CONTAINER}"
                                 error "Application health check failed with status ${statusCode}"
                             }
@@ -195,10 +162,9 @@ EOF
         stage('Final Verification') {
             steps {
                 script {
-                    // Final application health check
+                    // Final health check
                     timeout(time: 2, unit: 'MINUTES') {
                         try {
-                            // Using curl to check the root path (/)
                             def statusCode = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://localhost:${PORT}/ || echo 'failed'", returnStdout: true).trim()
                             
                             if (statusCode != "200") {
@@ -265,9 +231,6 @@ EOF
                     // First deployment and it failed
                     echo "Initial deployment failed - no previous version to roll back to"
                 }
-                
-                // Always try to clean up any residual containers to avoid confusion
-                sh "docker ps -a | grep ${APP_NAME} || true"
             }
         }
         success {
@@ -280,13 +243,9 @@ EOF
             }
         }
         always {
-            // Cleanup temporary files
-            sh "rm -f docker-compose.override.yml || true"
-            
             // Show current container state
             echo "Current container state:"
             sh "docker ps -a | grep ${APP_NAME} || true"
-            sh "docker ps -a | grep ${MONGO_CONTAINER} || true"
             
             // Clean up any failed builds to save disk space
             sh "docker system prune -f || true"

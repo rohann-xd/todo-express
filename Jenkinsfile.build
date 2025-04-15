@@ -1,0 +1,53 @@
+pipeline {
+    agent any
+
+    environment {
+        APP_NAME = "todo-app"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build Image') {
+            steps {
+                script {
+                    // Use withCredentials to retrieve Docker username
+                    withCredentials([
+                        string(credentialsId: 'docker-hub-username', variable: 'DOCKER_USER'),
+                        usernamePassword(credentialsId: 'docker-hub-credentials', usernameVariable: 'DOCKER_DUMMY_USER', passwordVariable: 'DOCKER_PASS')
+                    ]) {
+                        def dockerRepo = "${DOCKER_USER}/todo-app"
+                        def buildTag = "${dockerRepo}:${env.BUILD_NUMBER}"
+                        def latestTag = "${dockerRepo}:latest"
+
+                        // Build Docker image with both tags
+                        sh "docker build -t ${buildTag} -t ${latestTag} ."
+
+                        // Login to Docker and push images
+                        sh "echo ${DOCKER_PASS} | docker login -u ${DOCKER_USER} --password-stdin"
+                        sh "docker push ${buildTag}"
+                        sh "docker push ${latestTag}"
+
+                        // Store the repo as an env var for later stages
+                        env.DOCKER_HUB_REPO = dockerRepo
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            build job: 'todo-app-deploy', parameters: [
+                string(name: 'IMAGE_TAG', value: env.BUILD_NUMBER)
+            ], wait: false
+        }
+        always {
+            sh "docker system prune -f || true"
+        }
+    }
+}
