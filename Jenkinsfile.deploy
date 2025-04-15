@@ -10,7 +10,6 @@ pipeline {
         APP_BLUE = "${APP_NAME}-blue"
         APP_GREEN = "${APP_NAME}-green"
         BACKUP_CONTAINER = "${APP_NAME}-backup"
-        DOCKER_HUB_REPO = ""  // Replace with your Docker Hub username
         PORT = "3000"
     }
     
@@ -18,6 +17,14 @@ pipeline {
         stage('Prepare Environment') {
             steps {
                 script {
+                    // Set Docker Hub repository
+                    withCredentials([
+                        string(credentialsId: 'docker-hub-username', variable: 'DOCKER_USER')
+                    ]) {
+                        env.DOCKER_HUB_REPO = "${DOCKER_USER}/todo-app"
+                        echo "Using Docker Hub repository: ${env.DOCKER_HUB_REPO}"
+                    }
+                    
                     // Create .env file from Jenkins credentials
                     withCredentials([
                         string(credentialsId: 'MONGO_URI', variable: 'MONGO_URI'),
