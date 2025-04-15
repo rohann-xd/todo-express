@@ -139,28 +139,26 @@ pipeline {
         
         stage('Switch Traffic') {
             steps {
-                script {
-                    // Check if production app is running
-                    def prodExists = sh(script: "docker ps -a -q -f name=${APP_NAME}", returnStdout: true).trim()
-                    
-                    if (prodExists) {
-                        echo "Moving current production container to backup"
-                        sh "docker stop ${APP_NAME} || true"
-                        sh "docker rename ${APP_NAME} ${BACKUP_CONTAINER}"
-                    }
-                    
-                    // Rename the new container to production
-                    echo "Switching traffic to new deployment: ${env.TARGET_CONTAINER} → ${APP_NAME}"
-                    sh "docker rename ${env.TARGET_CONTAINER} ${APP_NAME}"
-                    
-                    // Make sure the new production container is running
-                    sh "docker start ${APP_NAME} || true"
-                    
-                    // Verify the switch was successful
-                    sh "sleep 5"
-                    def prodRunning = sh(script: "docker ps -q -f name=${APP_NAME}", returnStdout: true).trim()
-                    if (!prodRunning) {
-                        error "Failed to switch traffic - production container not running"
+            script {
+                // Check if production app is running
+                def prodExists = sh(script: "docker ps -a -q -f name=${APP_NAME}", returnStdout: true).trim()
+                if (prodExists) {
+                    echo "Moving current production container to backup"
+                    sh "docker stop ${APP_NAME} || true"
+                    sh "docker rename ${APP_NAME} ${BACKUP_CONTAINER}"
+                } else {
+                    echo "No existing production container found - skipping backup step"
+                }
+                // Rename the new container to production
+                echo "Switching traffic to new deployment: ${env.TARGET_CONTAINER} → ${APP_NAME}"
+                sh "docker rename ${env.TARGET_CONTAINER} ${APP_NAME}"
+                // Make sure the new production container is running
+                sh "docker start ${APP_NAME} || true"
+                // Verify the switch was successful
+                sh "sleep 5"
+                def prodRunning = sh(script: "docker ps -q -f name=${APP_NAME}", returnStdout: true).trim()
+                if (!prodRunning) {
+                    error "Failed to switch traffic - production container not running"
                     }
                 }
             }
