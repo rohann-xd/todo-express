@@ -11,6 +11,8 @@ pipeline {
         APP_GREEN = "${APP_NAME}-green"
         BACKUP_CONTAINER = "${APP_NAME}-backup"
         PORT = "3000"
+        BLUE_PORT = "3001"
+        GREEN_PORT = "3002"
     }
     
     stages {
@@ -66,6 +68,9 @@ pipeline {
                         env.TARGET_CONTAINER = APP_BLUE
                     }
                     
+                    // Set target port based on color
+                    env.TARGET_PORT = env.TARGET_COLOR == "blue" ? BLUE_PORT : GREEN_PORT
+                    
                     env.BEFORE_DEPLOYMENT_PROD_EXISTS = prodExists ? "true" : "false"
                     if (prodExists) {
                         env.BEFORE_DEPLOYMENT_PROD_COLOR = env.CURRENT_COLOR
@@ -77,7 +82,7 @@ pipeline {
                         sh "docker rm ${BACKUP_CONTAINER} || true"
                     }
                     
-                    echo "Deployment strategy: Current=${env.CURRENT_COLOR}, Target=${env.TARGET_COLOR} (${env.TARGET_CONTAINER})"
+                    echo "Deployment strategy: Current=${env.CURRENT_COLOR}, Target=${env.TARGET_COLOR} (${env.TARGET_CONTAINER}) on port ${env.TARGET_PORT}"
                 }
             }
         }
@@ -92,10 +97,10 @@ pipeline {
                     // Pull the latest image
                     sh "docker pull ${env.DOCKER_HUB_REPO}:${params.IMAGE_TAG}"
                     
-                    // Run the new container
+                    // Run the new container on a different port
                     sh """
                     docker run -d --name ${env.TARGET_CONTAINER} \
-                      -p ${PORT}:${PORT} \
+                      -p ${env.TARGET_PORT}:${PORT} \
                       --env-file .env \
                       --label color=${env.TARGET_COLOR} \
                       --label deployed="\$(date +'%Y-%m-%d-%H-%M-%S')" \
@@ -117,10 +122,10 @@ pipeline {
                         error "New container failed to start: ${env.TARGET_CONTAINER}"
                     }
                     
-                    // Health check
+                    // Health check on target port
                     timeout(time: 2, unit: 'MINUTES') {
                         try {
-                            def statusCode = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://localhost:${PORT}/ || echo 'failed'", returnStdout: true).trim()
+                            def statusCode = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://localhost:${env.TARGET_PORT}/ || echo 'failed'", returnStdout: true).trim()
                             
                             if (statusCode != "200") {
                                 sh "docker logs ${env.TARGET_CONTAINER}"
@@ -138,40 +143,58 @@ pipeline {
         }
         
         stage('Switch Traffic') {
-    steps {
-        script {
-            // Check if production app is running
-            def prodExists = sh(script: "docker ps -a -q -f name=${APP_NAME}", returnStdout: true).trim()
-            
-            if (prodExists) {
-                echo "Moving current production container to backup"
-                sh "docker stop ${APP_NAME} || true"
-                sh "docker rename ${APP_NAME} ${BACKUP_CONTAINER} || true"
-            } else {
-                echo "No existing production container found - skipping backup step"
-            }
-            
-            // Rename the new container to production
-            echo "Switching traffic to new deployment: ${env.TARGET_CONTAINER} → ${APP_NAME}"
-            sh "docker rename ${env.TARGET_CONTAINER} ${APP_NAME}"
-            
-            // Make sure the new production container is running
-            sh "docker start ${APP_NAME} || true"
-            
-            // Verify the switch was successful
-            sh "sleep 5"
-            def prodRunning = sh(script: "docker ps -q -f name=${APP_NAME}", returnStdout: true).trim()
-            if (!prodRunning) {
-                error "Failed to switch traffic - production container not running"
+            steps {
+                script {
+                    // Check if production app is running
+                    def prodExists = sh(script: "docker ps -a -q -f name=${APP_NAME}", returnStdout: true).trim()
+                    
+                    if (prodExists) {
+                        echo "Moving current production container to backup"
+                        sh "docker stop ${APP_NAME} || true"
+                        sh "docker rename ${APP_NAME} ${BACKUP_CONTAINER} || true"
+                    } else {
+                        echo "No existing production container found - skipping backup step"
+                    }
+                    
+                    // Stop the new container before renaming to avoid any port conflicts
+                    sh "docker stop ${env.TARGET_CONTAINER} || true"
+                    
+                    // Rename the new container to production
+                    echo "Switching traffic to new deployment: ${env.TARGET_CONTAINER} → ${APP_NAME}"
+                    sh "docker rename ${env.TARGET_CONTAINER} ${APP_NAME}"
+                    
+                    // Start the renamed container with port 3000
+                    sh """
+                    docker run --detach \
+                      --name ${APP_NAME}-temp \
+                      -p ${PORT}:${PORT} \
+                      --env-file .env \
+                      --label color=${env.TARGET_COLOR} \
+                      --label deployed="\$(date +'%Y-%m-%d-%H-%M-%S')" \
+                      --volumes-from ${APP_NAME} \
+                      ${env.DOCKER_HUB_REPO}:${params.IMAGE_TAG}
+                    """
+                    
+                    // Remove the old container
+                    sh "docker rm ${APP_NAME} || true"
+                    
+                    // Rename the temporary container to production
+                    sh "docker rename ${APP_NAME}-temp ${APP_NAME}"
+                    
+                    // Make sure the new production container is running
+                    sh "sleep 5"
+                    def prodRunning = sh(script: "docker ps -q -f name=${APP_NAME}", returnStdout: true).trim()
+                    if (!prodRunning) {
+                        error "Failed to switch traffic - production container not running"
+                    }
+                }
             }
         }
-    }
-}
         
         stage('Final Verification') {
             steps {
                 script {
-                    // Final health check
+                    // Final health check on main port
                     timeout(time: 2, unit: 'MINUTES') {
                         try {
                             def statusCode = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://localhost:${PORT}/ || echo 'failed'", returnStdout: true).trim()
@@ -214,7 +237,11 @@ pipeline {
                     // Restore from backup
                     echo "Restoring from backup container"
                     sh "docker rename ${BACKUP_CONTAINER} ${APP_NAME}"
-                    sh "docker start ${APP_NAME} || true"
+                    
+                    // Start the restored container on port 3000
+                    sh "docker run --detach --name ${APP_NAME}-temp -p ${PORT}:${PORT} --volumes-from ${APP_NAME} --env-file .env ${env.DOCKER_HUB_REPO}:${params.IMAGE_TAG}"
+                    sh "docker rm ${APP_NAME} || true"
+                    sh "docker rename ${APP_NAME}-temp ${APP_NAME}"
                     
                     // Check if rollback was successful
                     def rolledBackContainerRunning = sh(script: "docker ps -q -f name=${APP_NAME}", returnStdout: true).trim()
@@ -249,6 +276,10 @@ pipeline {
                 
                 // Update the color label on the production container
                 sh "docker label ${APP_NAME} color=${env.TARGET_COLOR} || true"
+                
+                // Clean up the backup container if it exists
+                sh "docker stop ${BACKUP_CONTAINER} || true"
+                sh "docker rm ${BACKUP_CONTAINER} || true"
             }
         }
         always {
